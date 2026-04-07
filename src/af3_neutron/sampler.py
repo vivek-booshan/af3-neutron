@@ -5,7 +5,8 @@ from alphafold3.model.network import diffusion_head
 from .kinematics import generalized_nerf_layer
 
 def placeholder_neutron_loss(x_full):
-    return jnp.sum(x_full ** 2)
+    # Use mean instead of sum, and scale it down to act as a gentle dummy force
+    return jnp.mean(x_full ** 2) * 0.01
 
 def decoupled_crystallographic_loss(x_af3_flat, chi_angles, rotor_table, mapping):
     x_full = jnp.zeros((mapping["num_oracle_atoms"], 3))
@@ -35,22 +36,19 @@ def run_neutron_guided_diffusion(
     lr_chi = 0.1
     
     noise_levels = diffusion_head.noise_schedule(jnp.linspace(0, 1, n_steps + 1))
-    
-    # Initialize a master key for the diffusion loop
     key = jax.random.PRNGKey(42)
     
     for step in range(n_steps):
         noise_level_prev = noise_levels[step]
         noise_level = noise_levels[step + 1]
         
-        # Split the key for this step
         key, step_key = jax.random.split(key)
         
-        # 1. Ask AF3 to denoise (Notice step_key is passed FIRST!)
+        # 1. Ask AF3 to denoise
         t_hat = jnp.array([noise_level_prev])
         positions_denoised = vf_step_fn(step_key, positions, t_hat, batch, embeddings)
         
-        # 2. Extract gradient (Velocity vector)
+        # 2. Extract AF3 Velocity vector
         grad_af3 = (positions - positions_denoised) / t_hat
         
         # 3. Calculate Neutron Gradients
@@ -60,6 +58,11 @@ def run_neutron_guided_diffusion(
         loss_val, (grad_heavy_flat, grad_chi) = grad_loss_fn(
             x_0_flat, chi_angles, rotor_table, mapping
         )
+        
+        # Prevents physics updates from blowing up the neural network's ODE solver
+        grad_heavy_flat = jnp.clip(grad_heavy_flat, -1.0, 1.0)
+        grad_chi = jnp.clip(grad_chi, -0.1, 0.1)
+        
         logging.info(f"ODE Step {step} | Neutron Loss: {loss_val:.4f}")
         
         # 4. Apply Crystallographic Guidance
