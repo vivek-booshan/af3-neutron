@@ -2,6 +2,7 @@ import logging
 import pathlib
 import jax
 import jax.numpy as jnp
+import numpy as np
 from absl import app
 from absl import flags
 
@@ -20,6 +21,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('mtz_path', '', 'Optional path to MTZ file for neutron refinement.')
 flags.DEFINE_string('json_path', 'betalac_tetramer_refinement_input.json', 'Path to JSON.')
 flags.DEFINE_string('model_dir', '../af3_model_parameters/', 'Path to weights.')
+flags.DEFINE_string('output_path', 'neutron_refined_output.cif', 'Path to save the final mmCIF.')
 flags.DEFINE_integer('gpu_device', 0, 'GPU to use.')
 
 def main(argv):
