@@ -101,6 +101,9 @@ def main(argv):
     else:
         sfc_instance = None
 
+    # Grab the exact Diffusion config used by the network
+    diff_config = model_runner._model_config.heads.diffusion.eval
+
     final_coords, final_chis, final_waters = run_neutron_guided_diffusion(
         vf_step_fn=model_runner.evaluate_vector_field,
         batch=batch,
@@ -111,7 +114,8 @@ def main(argv):
         mapping=mapping,
         water_mapping=water_mapping,
         sfc_instance=sfc_instance,
-        n_steps=20
+        n_steps=200,
+        diff_config=diff_config
     )
     
     logging.info("Assembling final atomic coordinates...")

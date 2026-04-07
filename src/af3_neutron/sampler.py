@@ -2,6 +2,7 @@ import logging
 import jax
 import jax.numpy as jnp
 from alphafold3.model.network import diffusion_head
+from alphafold3.model.network.diffusion_head import random_augmentation
 from .kinematics import generalized_nerf_layer, so3_water_layer
 
 def placeholder_neutron_loss(x_full):
@@ -45,9 +46,10 @@ grad_loss_fn = jax.value_and_grad(decoupled_crystallographic_loss, argnums=(0, 1
 
 def run_neutron_guided_diffusion(
     vf_step_fn, batch, embeddings, initial_noise, gather_idxs,
-    rotor_table, mapping, water_mapping, sfc_instance=None, n_steps=20
+    rotor_table, mapping, water_mapping, sfc_instance=None, n_steps=200,
+    diff_config=None
 ):
-    logging.info("Starting Dual-Kinematic ODE Loop...")
+    logging.info("Starting Dual-Kinematic SDE Loop (AF3 Native EDM)...")
     
     positions = initial_noise
     mask = batch['pred_dense_atom_mask']
@@ -64,17 +66,42 @@ def run_neutron_guided_diffusion(
     noise_levels = diffusion_head.noise_schedule(jnp.linspace(0, 1, n_steps + 1))
     key = jax.random.PRNGKey(42)
     
+    # Safely extract DeepMind's native SDE parameters
+    gamma_0 = getattr(diff_config, 'gamma_0', 0.0) if diff_config else 0.0
+    gamma_min = getattr(diff_config, 'gamma_min', 0.0) if diff_config else 0.0
+    noise_scale_cfg = getattr(diff_config, 'noise_scale', 1.0) if diff_config else 1.0
+    step_scale = getattr(diff_config, 'step_scale', 1.0) if diff_config else 1.0
+    
     for step in range(n_steps):
         noise_level_prev = noise_levels[step]
         noise_level = noise_levels[step + 1]
+
+        key, step_key, key_noise, key_aug = jax.random.split(key, 4)
         
-        key, step_key = jax.random.split(key)
-        t_hat = jnp.array([noise_level_prev])
+        # 0. Native AF3 Augmentation (Centering)
+        # We strictly omit random 3D rotations to preserve the SFC_Jax crystal lattice frame,
+        # but we MUST apply masked centering to prevent multimer drift!
+        com = jnp.sum(positions * mask[..., None], axis=(0, 1)) / (jnp.sum(mask) + 1e-8)
+        positions = (positions - com) * mask[..., None]
         
-        positions_denoised = vf_step_fn(step_key, positions, t_hat, batch, embeddings)
-        grad_af3 = (positions - positions_denoised) / t_hat
+        # 1. EDM SDE Noise Injection
+        gamma = gamma_0 * (noise_level > gamma_min)
+        t_hat = noise_level_prev * (1 + gamma)
+
+        var_diff = jnp.clip(t_hat**2 - noise_level_prev**2, a_min=0.0)
+        noise_scale = noise_scale_cfg * jnp.sqrt(var_diff)
+        noise = noise_scale * jax.random.normal(key_noise, positions.shape) * mask[..., None]
         
-        # JAX will automatically route gradients back to the (N, 24, 3) shape!
+        positions_noisy = positions + noise
+
+        # 2. Evaluate AF3 Denoising Step
+        t_hat_arr = jnp.array([t_hat])
+        positions_denoised = vf_step_fn(step_key, positions_noisy, t_hat_arr, batch, embeddings)
+        
+        # 3. AF3 Score/Gradient
+        grad_af3 = (positions_noisy - positions_denoised) / t_hat
+        
+        # 4. Calculate Physics Loss using the clean denoised positions
         loss_val, (grad_positions, grad_chi, grad_water) = grad_loss_fn(
             positions_denoised, chi_angles, water_rotations, gather_idxs, 
             rotor_table, mapping, water_mapping, sfc_instance
@@ -85,14 +112,21 @@ def run_neutron_guided_diffusion(
         grad_water = jnp.clip(grad_water, -0.1, 0.1)
         
         loss_type = "SFC L2" if sfc_instance else "Dummy"
-        logging.info(f"ODE Step {step} | {loss_type} Loss: {loss_val:.4f}")
+        if step % 10 == 0 or step == n_steps - 1:
+            logging.info(f"ODE Step {step} | {loss_type} Loss: {loss_val:.4f}")
         
+        # 5. Native Update Step (Combining AF3 drift + Physics drift)
         d_t = noise_level - t_hat
-        positions = positions + 1.5 * d_t * grad_af3 - (lr_heavy * grad_positions)
+        
+        positions_out = positions_noisy + step_scale * d_t * grad_af3 - (lr_heavy * grad_positions)
+        
+        # Apply mask to output
+        positions = positions_out * mask[..., None]
+        
         chi_angles = chi_angles - (lr_chi * grad_chi)
         water_rotations = water_rotations - (lr_chi * grad_water)
         
-    return positions * mask[..., None], chi_angles, water_rotations
+    return positions_denoised * mask[..., None], chi_angles, water_rotations
 
 def generate_final_oracle_coords(positions_denoised, chi_angles, water_rotations, gather_idxs, rotor_table, mapping, water_mapping):
     # FIX: Flatten and gather here as well
