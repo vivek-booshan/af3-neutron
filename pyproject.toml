@@ -11,6 +11,8 @@ dependencies = [
     "gemmi>=0.7.3",
     "gemmi-program>=0.7.5",
     "sfcalculator-jax",
+    "biotite>=1.6.0",
+    "hydride>=1.2.3",
 ]
 
 [tool.uv.sources]

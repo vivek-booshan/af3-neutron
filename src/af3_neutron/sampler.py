@@ -1,4 +1,5 @@
 import logging
+import jax
 import jax.numpy as jnp
 from .loss import get_grad_loss_fn
 from .kinematics import generalized_nerf_layer
@@ -17,23 +18,30 @@ def run_neutron_guided_diffusion(af3_step_fn, batch, rotor_table, n_steps=5):
     learning_rate_heavy = 0.01
     learning_rate_chi = 0.05
     
-    # In a full AF3 integration, x_t is drawn from the batch's initial noise
+    # Calculate the required size of the flat coordinate array based on the table
+    max_idx = jnp.max(rotor_table["target_idx"]) if num_rotors > 0 else 10000
+    mock_num_atoms = int(max_idx) + 1
+    
+    # Fixed random key for reproducible mock coordinates
+    key = jax.random.PRNGKey(42)
     
     for step in range(n_steps):
         time_step = 1.0 - (step / n_steps)
         
-        # 1. Mock AF3 Output
-        x_0_pred = jnp.ones((batch['token_index'].shape[0], 3))
+        # 1. Mock AF3 Output using random coordinates instead of ones
+        # This gives atoms distinct spatial coordinates, avoiding zero-length vectors
+        key, subkey = jax.random.split(key)
+        x_0_pred = jax.random.normal(subkey, (mock_num_atoms, 3))
         
         # 2. Calculate Loss and Gradients
         loss_val, (grad_heavy, grad_chi) = grad_loss_fn(
-            x_0_pred,       # arg 0: heavy_coords
-            chi_angles,     # arg 1: chi_angles
-            rotor_table,    # arg 2: rotor_table
-            x_0_pred        # arg 3: original_coords
+            x_0_pred,      # arg 0: heavy_coords
+            chi_angles,    # arg 1: chi_angles
+            rotor_table,   # arg 2: rotor_table
+            x_0_pred       # arg 3: original_coords
         )
-        logging.info(f"Step {step} | Neutron Loss: {loss_val:.4f}") 
-
+        logging.info(f"Step {step} | Neutron Loss: {loss_val:.4f}")
+        
         # 3. Update Variables
         x_0_guided = x_0_pred - (learning_rate_heavy * grad_heavy)
         chi_angles = chi_angles - (learning_rate_chi * grad_chi)

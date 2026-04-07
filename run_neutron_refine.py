@@ -18,25 +18,21 @@ def main():
     json_path = "betalac_tetramer_refinement_input.json"
     logging.info(f"Processing {json_path}")
     
-    # THE FIX: Use pathlib and extract the first job
     fold_inputs = folding_input.load_fold_inputs_from_path(pathlib.Path(json_path))
     fold_input = next(fold_inputs)
-    
+
     ccd = chemical_components.Ccd()
     
-    # AF3 Pipeline Step 1: Clean Structure
-    # AF3 Pipeline Step 1: Clean Structure
     struct = fold_input.to_structure(ccd=ccd)
     cleaned_struc, _ = structure_cleaning.clean_structure(
-        struct,
-        ccd=ccd,
-        drop_non_standard_atoms=True,
+        struct, 
+        ccd=ccd, 
+        drop_non_standard_atoms=True, 
         drop_missing_sequence=True,
-        # --- Required Keyword Arguments ---
         filter_clashes=False,
         filter_crystal_aids=False,
         filter_waters=True,
-        filter_hydrogens=False, # <-- CRITICAL FOR NEUTRON PIPELINE: Keep H's!
+        filter_hydrogens=False, 
         filter_leaving_atoms=True,
         only_glycan_ligands_for_leaving_atoms=True,
         covalent_bonds_only=True,
@@ -44,10 +40,14 @@ def main():
         remove_bad_bonds=True,
         remove_nonsymmetric_bonds=False
     )
+    
+    # PASS fold_input DOWN TO THE TOPOLOGY BUILDER
+    flat_output_layout, rotor_table = inject_superset_topology_and_get_rotors(
+        cleaned_struc, 
+        ccd, 
+        fold_input
+    ) 
 
-    # AF3 Pipeline Step 2: Intercept to build Super-Set Topology & Z-Matrix
-    flat_output_layout, rotor_table = inject_superset_topology_and_get_rotors(cleaned_struc, ccd)
-   
     # AF3 Pipeline Step 3: Tokenization
     all_tokens, all_token_atoms_layout, standard_token_idxs = features.tokenizer(
         flat_output_layout,
