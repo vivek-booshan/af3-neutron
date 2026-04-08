@@ -68,15 +68,23 @@ def main(argv):
     logging.info("Loading AF3 Weights...")
     device = jax.local_devices(backend='gpu')[FLAGS.gpu_device]
     model_runner = ModelRunner(config=make_model_config(), device=device, model_dir=model_dir)
-    
+   
+    # 1. Extract Seed from JSON to perfectly match reference run
+    model_seed = fold_input.rng_seeds[0] if fold_input.rng_seeds else 1
+
     logging.info("Executing AF3 Trunk (Pairformer)...")
-    rng_key = jax.random.PRNGKey(42)
-    trunk_key, noise_key = jax.random.split(rng_key)
+    rng_key = jax.random.PRNGKey(model_seed)
+    trunk_key, diffusion_key = jax.random.split(rng_key)
     
     embeddings = model_runner.get_conditionings(trunk_key, batch)
     
+    # Extract the diffusion config
+    diff_config = model_runner._model_config.heads.diffusion.eval
+    n_steps = getattr(diff_config, 'steps', 200) if diff_config else 200
+
     mask_shape = batch['pred_dense_atom_mask'].shape
-    noise_levels = diffusion_head.noise_schedule(jnp.linspace(0, 1, 21))
+    noise_levels = diffusion_head.noise_schedule(jnp.linspace(0, 1, n_steps + 1))
+    sample_key, noise_key = jax.random.split(diffusion_key)
     initial_noise = jax.random.normal(noise_key, mask_shape + (3,)) * noise_levels[0]
    
     # --- NEW: Generate 1-step baseline prediction for Oracle initialization ---
@@ -101,8 +109,6 @@ def main(argv):
         logging.info("No MTZ file provided. Running with dummy physics loss.")
         sfc_instance = None
     
-    # Extract the diffusion config
-    diff_config = model_runner._model_config.heads.diffusion.eval
    
     final_coords, final_chis, final_waters = run_neutron_guided_diffusion(
         vf_step_fn=model_runner.evaluate_vector_field,
@@ -114,8 +120,8 @@ def main(argv):
         mapping=mapping,
         water_mapping=water_mapping,
         sfc_instance=sfc_instance,
-        n_steps=200,
-        diff_config=diff_config
+        diff_config=diff_config,
+        sample_key=sample_key
     )
      
     logging.info("Assembling final atomic coordinates...")
