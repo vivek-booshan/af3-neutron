@@ -111,23 +111,22 @@ def main(argv):
     
    
     final_coords, final_chis, final_waters = run_neutron_guided_diffusion(
-        vf_step_fn=model_runner.evaluate_vector_field,
-        batch=batch,
+        model_runner=model_runner,
+        batch_dict=batch,         # For native vf_step_fn
         embeddings=embeddings,
-        initial_noise=initial_noise,
         gather_idxs=gather_idxs,
         rotor_table=rotor_table,
         mapping=mapping,
         water_mapping=water_mapping,
         sfc_instance=sfc_instance,
-        diff_config=diff_config,
         sample_key=sample_key
     )
      
     logging.info("Assembling final atomic coordinates...")
+    reference_coords = jnp.array(oracle_atoms.coord, dtype=jnp.float32)
     final_x_full = generate_final_oracle_coords(
-        final_coords, final_chis, final_waters, gather_idxs, 
-        rotor_table, mapping, water_mapping
+        final_coords, final_chis, final_waters, gather_idxs,
+        rotor_table, mapping, water_mapping, reference_coords
     )
 
     oracle_atoms.coord = np.array(final_x_full)

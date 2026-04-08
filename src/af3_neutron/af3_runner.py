@@ -64,6 +64,9 @@ class TrunkWrapper(hk.Module):
         return embeddings
 
 
+# -------------------------------------------------------------------------
+# THE BASELINE WRAPPER (For the 1-step Oracle initialization)
+# -------------------------------------------------------------------------
 class DiffusionWrapper(hk.Module):
     def __init__(self, config, name='diffuser'):
         super().__init__(name=name)
@@ -79,6 +82,49 @@ class DiffusionWrapper(hk.Module):
             batch=batch,
             embeddings=embeddings,
             use_conditioning=True
+        )
+
+# -------------------------------------------------------------------------
+# 2. THE GUIDED SDE WRAPPER (For the 200-step physics refinement)
+# -------------------------------------------------------------------------
+class GuidedDiffusionWrapper(hk.Module):
+    def __init__(self, config, name='diffuser'):
+        super().__init__(name=name)
+        self.config = config
+        self.diffusion_module = diffusion_head.DiffusionHead(
+            self.config.heads.diffusion, self.config.global_config
+        )
+
+    def __call__(self, batch, embeddings, grad_fn, sample_key):
+        sample_config = self.config.heads.diffusion.eval
+
+        def guided_denoising_step(positions_noisy, t_hat):
+            # 1. Native AF3 Vector Field (Evaluates in the Augmented Frame)
+            x_0 = self.diffusion_module(
+                positions_noisy=positions_noisy,
+                noise_level=t_hat,
+                batch=batch,
+                embeddings=embeddings,
+                use_conditioning=True
+            )
+            
+            # 2. Covariant Loss Gradient
+            loss_val, grad_x0 = grad_fn(x_0)
+            jax.debug.print("SDE Step Loss (Covariant): {loss:.4f}", loss=loss_val)
+            
+            # 3. Apply physics torque directly to x_0
+            lr_heavy = 0.05
+            grad_x0_clipped = jnp.clip(grad_x0, -1.0, 1.0)
+            x_0_guided = x_0 - (lr_heavy * grad_x0_clipped)
+            
+            return x_0_guided
+
+        # Run Native Sample Loop entirely inside the Haiku context!
+        return diffusion_head.sample(
+            denoising_step=guided_denoising_step,
+            batch=batch,
+            key=sample_key,
+            config=sample_config
         )
 
 # -------------------------------------------------------------------------
@@ -115,3 +161,19 @@ class ModelRunner:
             )
 
         return functools.partial(jax.jit(forward_diffusion.apply, device=self._device), self.model_params)
+
+    @functools.cached_property
+    def sample_guided_diffusion(self):
+        """Executes the entire Guided Diffusion Loop natively inside Haiku."""
+        @hk.transform
+        def forward_sample(batch_dict, embeddings, grad_fn, sample_key):
+            batch = feat_batch.Batch.from_data_dict(batch_dict)
+            return GuidedDiffusionWrapper(self._model_config)(batch, embeddings, grad_fn, sample_key)
+
+        # Note: grad_fn is a Python closure, so it MUST be marked as a static_argnum.
+        # Apply signature: (params, rng, batch_dict, embeddings, grad_fn, sample_key)
+        # Index 4 is grad_fn.
+        return functools.partial(
+            jax.jit(forward_sample.apply, static_argnums=(4,), device=self._device),
+            self.model_params
+        )
